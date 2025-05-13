@@ -14,7 +14,7 @@
 
 int main(int argc, char *argv[]){
   if (argc!=3) {
-    fprintf(stderr, "usage: client hotsname message");
+    fprintf(stderr, "usage: talker hotsname message");
     exit(1);
   }
 
@@ -29,6 +29,7 @@ int main(int argc, char *argv[]){
 
   if ((rv=getaddrinfo(argv[1], PORT, &hints, &servinfo))==-1) {
     fprintf(stderr, "talker: getaddrinfo %s\n", gai_strerror(rv));
+    exit(1);
   }
 
 
@@ -48,7 +49,7 @@ int main(int argc, char *argv[]){
     exit(2);
   }
 
-  if ((numbytes=sendto(sockfd, argv[1], strlen(argv[2]),0, p->ai_addr, p->ai_addrlen ))) {
+  if ((numbytes=sendto(sockfd, argv[2], strlen(argv[2]),0, p->ai_addr, p->ai_addrlen ))==-1) {
       perror("listener: sendto \n");
       exit(3);
   }
