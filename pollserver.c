@@ -1,5 +1,4 @@
 #include <arpa/inet.h>
-#include <asm-generic/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -28,194 +27,191 @@ struct _pfds {
 
 typedef struct _pfds pollArray;
 
+// Get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa) {
   if (sa->sa_family == AF_INET) {
     return &(((struct sockaddr_in *)sa)->sin_addr);
   }
-
   return &(((struct sockaddr_in6 *)sa)->sin6_addr);
 }
 
+// Return a listening socket
 int get_listener_socket(void) {
   int listener, rv;
   struct addrinfo hints, *servinfo, *p;
   int yes = 1;
 
   memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
+  hints.ai_family = AF_INET;       // IPv4 only; use AF_UNSPEC + disable IPV6_V6ONLY for dual-stack
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_PASSIVE;
 
-  if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) == -1) {
-    fprintf(stderr, "sever: getaddrinfo %s", gai_strerror(rv));
+  if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
+    fprintf(stderr, "server: getaddrinfo: %s\n", gai_strerror(rv));
     exit(1);
   }
 
   for (p = servinfo; p != NULL; p = p->ai_next) {
     // Create a socket descriptor out of the first one we can
-    if ((listener = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) ==
-        -1) {
-      perror("server: socket\n");
+    if ((listener = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+      perror("server: socket");
       continue;
-      exit(1);
     }
-    // Tell the socket to use port address
-    setsockopt(listener, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof(yes));
+
+    // Lose the pesky "address already in use" error message
+    if (setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) == -1) {
+      perror("server: setsockopt");
+      close(listener);
+      continue;
+    }
 
     // bind the socket to system port
-    if ((rv = bind(listener, p->ai_addr, p->ai_addrlen)) == -1) {
-      perror("server: bind\n");
+    if (bind(listener, p->ai_addr, p->ai_addrlen) == -1) {
+      perror("server: bind");
+      close(listener);
       continue;
     }
+
     break;
   }
 
   if (p == NULL) {
-    fprintf(stderr, "server: could not create a socket \n");
+    fprintf(stderr, "server: could not bind to any address\n");
     exit(1);
   }
 
-  // All done with this
   freeaddrinfo(servinfo);
 
-  printf("server: created socket\n");
   // start listening for incoming connections
-  printf("server : listening to incoming connections\n");
-  listen(listener, BACKLOG);
-  // Return the socket descriptort
+  if (listen(listener, BACKLOG) == -1) {
+    perror("server: listen");
+    exit(1);
+  }
+
+  printf("server: created socket and listening on port %s\n", PORT);
   return listener;
 }
 
-int add_to_pfds(pollArray *_pollArray, int newfd) {
+int add_to_pfds(pollArray *pa, int newfd) {
   // Handle Overflow
-  int *count = &_pollArray->count;
-  int *size = &_pollArray->size;
-  if (*count == *size) {
-    printf("sever: pollArray overflow");
-    int newSize = (*size) * 2;
+  if (pa->count == pa->size) {
+    printf("server: pollArray overflow\n");
+    int newSize = pa->size * 2;
     if (newSize <= MAX_PARR_SIZE) {
-      (*size) = newSize;
-      void *temp = realloc(_pollArray, (sizeof(pollArray *) * (*size)));
+      pa->size = newSize;
+      struct pollfd *temp = realloc(pa->pfds, sizeof(struct pollfd) * pa->size);
+      if (!temp) {
+        perror("server: realloc");
+        exit(1);
+      }
+      pa->pfds = temp;
     } else {
-      fprintf(stderr, "server: critical pollArray cannot handle overflow");
-      return 1;
+      fprintf(stderr, "server: critical pollArray cannot handle overflow\n");
+      return -1;
     }
   }
-  _pollArray->pfds[*count].fd = newfd;
-  _pollArray->pfds[*count].events =
-      POLLIN; // Register connect , and ready_to_send
-  _pollArray->pfds[*count].revents =
-      0; // revent is used to check if the event has occurred
-  *(count)++;
-  fprintf(stdout, "server: added sockfd to poll array");
+
+  pa->pfds[pa->count].fd = newfd;
+  pa->pfds[pa->count].events = POLLIN;    // Register for incoming data
+  pa->pfds[pa->count].revents = 0;        // clear revents
+  pa->count++;
+  fprintf(stdout, "server: added sockfd %d to poll array\n", newfd);
   return 0;
 }
 
-void del_from_pfds(pollArray *_pollArray, int i) {
+void del_from_pfds(pollArray *pa, int i) {
   // copy the one from last here
-  _pollArray->pfds[i] = _pollArray->pfds[_pollArray->count - 1];
+  close(pa->pfds[i].fd);
+  pa->pfds[i] = pa->pfds[pa->count - 1];
   // decrement count to overwrite the one we copied on the next add_to
-  _pollArray->count--;
+  pa->count--;
 }
 
-int main(int argc, char *argsv[]) {
-
-  // get_listener_socket
-  pollArray *_pollArray =
-      malloc(sizeof(pollArray)); // Allocate memory for pollArray structure
-  if (!_pollArray) {
+int main(int argc, char *argv[]) {
+  // Allocate pollArray structure
+  pollArray *pa = malloc(sizeof(pollArray));
+  if (!pa) {
     fprintf(stderr, "server: malloc failed for pollArray\n");
     exit(1);
   }
-
-  _pollArray->pfds = malloc(sizeof(struct pollfd) *
-                            INIT_ARR_SIZE); 
-  if (!_pollArray->pfds) {
+  // Initialize pfds array
+  pa->pfds = malloc(sizeof(struct pollfd) * INIT_ARR_SIZE);
+  if (!pa->pfds) {
     fprintf(stderr, "server: malloc failed for pfds array\n");
-    free(_pollArray); 
+    free(pa);
     exit(1);
   }
+  pa->count = 0;
+  pa->size  = INIT_ARR_SIZE;
 
-  _pollArray->count = 0;
-  _pollArray->size = INIT_ARR_SIZE;
-
-  int newfd;
-  struct sockaddr_storage remoteaddr;
-  socklen_t addrlen;
-
-  char buf[MAX_BUF_SIZE];
-
-  char remoteIP[INET6_ADDRSTRLEN];
-
-  // get_listener_socket
   int listener = get_listener_socket();
-  //  add listener to pfds array
   if (listener == -1) {
     fprintf(stderr, "server: could not create listener\n");
     exit(2);
   }
-  add_to_pfds(_pollArray, listener);
+  // add listener to pfds array
+  add_to_pfds(pa, listener);
 
-  //  start event loop
+  struct sockaddr_storage remoteaddr;
+  socklen_t addrlen;
+  char buf[MAX_BUF_SIZE];
+  char remoteIP[INET6_ADDRSTRLEN];
+
+  // start event loop
   while (1) {
-    int poll_count = poll(_pollArray->pfds, _pollArray->count, -1);
-
+    int poll_count = poll(pa->pfds, pa->count, -1);
     if (poll_count == -1) {
-      perror("server: poll \n");
+      perror("server: poll");
       exit(2);
     }
-    for (int i = 0; i < poll_count; i++) {
-      // If some client got a event
 
-      // Identify the client using bitwise AND for incoming connections as well
-      // as data from one of the sockets
-      if (_pollArray->pfds[i].revents & (POLLIN | POLLHUP)) {
-        if (_pollArray->pfds[i].fd == listener) {
+    for (int i = 0; i < pa->count; i++) {
+      // If some client got an event (incoming data or hangup)
+      if (pa->pfds[i].revents & (POLLIN | POLLHUP)) {
+        if (pa->pfds[i].fd == listener) {
           // Listener got a new connection
           addrlen = sizeof remoteaddr;
-          newfd = accept(listener, (struct sockaddr *)&remoteaddr, &addrlen);
-
+          int newfd = accept(listener,
+                             (struct sockaddr *)&remoteaddr,
+                             &addrlen);
           if (newfd == -1) {
-            fprintf(stderr, "server: new connection invalid descriptor\n");
-            exit(2);
+            perror("server: accept");
+            continue;
           }
 
-          // Otherwise we will listen from this socket
-          add_to_pfds(_pollArray, newfd);
-
-          printf("server got connection from %s on socket %d\n",
+          // add new client socket to poll array
+          add_to_pfds(pa, newfd);
+          printf("server: got connection from %s on socket %d\n",
                  inet_ntop(remoteaddr.ss_family,
                            get_in_addr((struct sockaddr *)&remoteaddr),
                            remoteIP, INET6_ADDRSTRLEN),
                  newfd);
         }
-
         else {
-          // socket pfds[i] send some message
-          int nbytes = recv(_pollArray->pfds[i].fd, buf, sizeof(buf), 0);
+          // Data from a client socket
+          int senderfd = pa->pfds[i].fd;
+          int nbytes = recv(senderfd, buf, sizeof(buf) - 1, 0);
 
-          int senderfd = _pollArray->pfds[i].fd;
+          if (nbytes <= 0) {
+            // nbytes == 0: client closed; nbytes == -1: error
+            if (nbytes == 0)
+              printf("server: socket %d hung up\n", senderfd);
+            else
+              perror("server: recv");
+            del_from_pfds(pa, i);
+            i--;  // adjust index after removal
+          } else {
+            buf[nbytes] = '\0';
+            printf("server: got '%s' from socket %d\n", buf, senderfd);
 
-          if (nbytes == -1) {
-            // TODO Handle if 0 bytes were sent
-            fprintf(stderr, "server: could not write into buffer for socket %d",
-                    senderfd);
-
-            close(_pollArray->pfds[i].fd);
-
-            del_from_pfds(_pollArray, i);
-          }
-
-          else {
             // Broadcast message to other sockets
-            for (int j = 0; j < poll_count; j++) {
-              int destfd = _pollArray->pfds[j].fd;
-              if (destfd == senderfd || destfd == listener) {
-                if (send(destfd, buf, sizeof(buf), 0) == -1) {
-                  fprintf(stderr, "could not send message to %d socket \n",
-                          destfd);
+            for (int j = 0; j < pa->count; j++) {
+              int destfd = pa->pfds[j].fd;
+              if (destfd != senderfd && destfd != listener) {
+                if (send(destfd, buf, nbytes, 0) == -1) {
+                  perror("server: send");
                 } else {
-                  printf("server sent message to %d socket\n", destfd);
+                  printf("server: sent message to socket %d\n", destfd);
                 }
               }
             }
