@@ -78,9 +78,10 @@ int get_listener_socket(void) {
   // All done with this
   freeaddrinfo(servinfo);
 
-  // start listening for incoming connections
-  listen(listener, BACKLOG);
   printf("server: created socket\n");
+  // start listening for incoming connections
+  printf("server : listening to incoming connections\n");
+  listen(listener, BACKLOG);
   // Return the socket descriptort
   return listener;
 }
@@ -120,13 +121,23 @@ void del_from_pfds(pollArray *_pollArray, int i) {
 int main(int argc, char *argsv[]) {
 
   // get_listener_socket
-  pollArray *_pollArray;
-  _pollArray =
-      malloc(sizeof(pollArray) + sizeof(struct pollfd) * INIT_ARR_SIZE);
+  pollArray *_pollArray =
+      malloc(sizeof(pollArray)); // Allocate memory for pollArray structure
   if (!_pollArray) {
-    fprintf(stderr, "server: malloc failed\n");
+    fprintf(stderr, "server: malloc failed for pollArray\n");
     exit(1);
   }
+
+  _pollArray->pfds = malloc(sizeof(struct pollfd) *
+                            INIT_ARR_SIZE); 
+  if (!_pollArray->pfds) {
+    fprintf(stderr, "server: malloc failed for pfds array\n");
+    free(_pollArray); 
+    exit(1);
+  }
+
+  _pollArray->count = 0;
+  _pollArray->size = INIT_ARR_SIZE;
 
   int newfd;
   struct sockaddr_storage remoteaddr;
